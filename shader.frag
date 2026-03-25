@@ -249,7 +249,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // Apply evolving palette based on total accumulated light
     float intensity = length(col);
     float palIdx = intensity * 0.01 + tSlow;
-    col *= palette(palIdx, palPhase) * 0.6 + 0.5;
+    col *= palette(palIdx, palPhase);
 
     // ─── Shimmer / Interference Layer ───────────────────────────────
     // Evolving screen-space pattern (not just pulsing dots)
@@ -270,7 +270,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     ) * (0.5 + 0.5 * sin(t * 0.0523));  // fade shimmer in/out
 
     // ─── Brightness normalization ───────────────────────────────────
-    col /= 55.0;
+    col /= 80.0;
 
     // ─── Particle / spark system ────────────────────────────────────
     for (float p = 0.0; p < 20.0; p++) {
@@ -309,7 +309,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     // ─── Center glow (palette-driven, evolving) ────────────────────
     vec3 centerCol = palette(l - 0.23 + tSlow * 0.5, palPhase);
-    col = mix(col, centerCol, 1.0 - smoothstep(0.01, 0.95, l));
+    float centerMix = (1.0 - smoothstep(0.01, 0.95, l)) * smoothstep(0.0, 0.3, intensity * 0.01);
+    col = mix(col, centerCol * col, centerMix);
 
     // ─── Anamorphic lens flare (horizontal streak) ─────────────────
     float flareStrength = exp(-abs(uv.y) * 8.0) * exp(-l * 2.0);
