@@ -1,336 +1,338 @@
 // ═══════════════════════════════════════════════════════════════════════
-// "云海 · Sublime Canyon"  —  Enhanced Edition
-// Volumetric cloud sea, reflective water, starfield, rim-lit peaks,
-// animated mist tendrils, and cinematic tone mapping
+// "虚空回廊 · Void Corridor"  —  Infinite Morphing Tunnel
+// Non-repeating volumetric raymarch with evolving geometry,
+// multi-palette color drift, particle systems, and cinematic grading
 // ═══════════════════════════════════════════════════════════════════════
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
+// Copyright (c) 2026 @WorkingClassHacker
+// Based on Abstract Shine by @Frostbyte
+// [LICENSE] https://creativecommons.org/licenses/by-nc-sa/4.0/
 
-#define LAYERS       12.0
-#define PI           3.14159265
-#define TAU          6.28318530
+// ─── Compact 2D rotation (cos-only approximation) ────────────────────
+#define R(a) mat2(cos(a + vec4(0, 33, 11, 0)))
+#define PI  3.14159265
+#define TAU 6.28318530
 
-// ─── Utilities ───────────────────────────────────────────────────────
-
-float hash(vec2 p) {
-    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
-
+// ─── Hash functions ──────────────────────────────────────────────────
 float hash21(vec2 p) {
     p = fract(p * vec2(234.34, 435.345));
     p += dot(p, p + 34.23);
     return fract(p.x * p.y);
 }
 
-float valuenoise(vec2 p) {
+float hash11(float p) {
+    p = fract(p * 0.1031);
+    p *= p + 33.33;
+    p *= p + p;
+    return fract(p);
+}
+
+// ─── Value noise with quintic interpolation ──────────────────────────
+float vnoise(vec2 p) {
     vec2 i = floor(p), f = fract(p);
     f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-    float a = hash(i),              b = hash(i + vec2(1, 0));
-    float c = hash(i + vec2(0, 1)), d = hash(i + vec2(1, 1));
+    float a = hash21(i), b = hash21(i + vec2(1, 0));
+    float c = hash21(i + vec2(0, 1)), d = hash21(i + vec2(1, 1));
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-// ─── Noise Variants ──────────────────────────────────────────────────
-
-// Ridged multifractal — sharp creases for jagged peaks
-float ridged(vec2 p, int oct) {
-    float val = 0.0, amp = 0.5, prev = 1.0;
-    mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
-    for (int i = 0; i < 8; i++) {
-        if (i >= oct) break;
-        float n = abs(valuenoise(p) * 2.0 - 1.0);
-        n = 1.0 - n; n *= n; n *= prev;
-        val += n * amp; prev = n;
-        p = rot * p * 2.13 + vec2(2.3, 1.7);
-        amp *= 0.52;
-    }
-    return val;
-}
-
-// Standard FBM — smooth rolling terrain & clouds
-float fbm(vec2 p, int oct) {
+// ─── FBM (4 octaves) ────────────────────────────────────────────────
+float fbm4(vec2 p) {
     float v = 0.0, a = 0.5;
     mat2 m = mat2(0.86, 0.5, -0.5, 0.86);
-    for (int i = 0; i < 8; i++) {
-        if (i >= oct) break;
-        v += a * valuenoise(p);
+    for (int i = 0; i < 4; i++) {
+        v += a * vnoise(p);
         p = m * p * 2.0 + vec2(1.7, 9.2);
         a *= 0.5;
     }
     return v;
 }
 
-// Warped FBM — organic flowing fog and cloud shapes
-float warpedFbm(vec2 p, float t) {
-    vec2 q = vec2(fbm(p + vec2(0.0, 0.0), 4),
-                  fbm(p + vec2(5.2, 1.3), 4));
-    vec2 r = vec2(fbm(p + 4.0 * q + vec2(1.7, 9.2) + t * 0.15, 4),
-                  fbm(p + 4.0 * q + vec2(8.3, 2.8) + t * 0.12, 4));
-    return fbm(p + 4.0 * r, 4);
+// ─── Color Palettes ─────────────────────────────────────────────────
+// IQ's cosine palette (MIT) — https://www.shadertoy.com/view/ll2GD3
+
+// Warm ember palette
+vec3 palWarm(float t) {
+    vec3 a = vec3(0.50, 0.38, 0.26);
+    vec3 b = vec3(0.50, 0.35, 0.25);
+    vec3 c = vec3(1.00, 1.00, 1.00);
+    vec3 d = vec3(0.00, 0.12, 0.25);
+    return a + b * cos(TAU * (c * t + d));
 }
 
-// ─── Starfield ───────────────────────────────────────────────────────
-
-vec3 stars(vec2 uv, float t) {
-    vec3 col = vec3(0.0);
-    // Two layers of stars at different scales
-    for (float s = 0.0; s < 2.0; s++) {
-        float scale = 200.0 + s * 300.0;
-        vec2 gv = fract(uv * scale) - 0.5;
-        vec2 id = floor(uv * scale);
-        float rnd = hash21(id + s * 77.7);
-        float size = smoothstep(0.95, 1.0, rnd);  // only brightest ~5%
-        float twinkle = sin(t * (2.0 + rnd * 4.0) + rnd * TAU) * 0.5 + 0.5;
-        float star = size * smoothstep(0.04, 0.0, length(gv)) * (0.5 + 0.5 * twinkle);
-        // Slightly warm/cool star color variation
-        vec3 starCol = mix(vec3(0.8, 0.85, 1.0), vec3(1.0, 0.9, 0.7), rnd);
-        col += star * starCol;
-    }
-    return col;
+// Cool aurora palette
+vec3 palCool(float t) {
+    vec3 a = vec3(0.743, 0.909, 0.960);
+    vec3 b = vec3(-0.711, 0.275, -0.052);
+    vec3 c = vec3(1.000, 1.855, 1.000);
+    vec3 d = vec3(0.180, 0.091, 0.380);
+    return a + b * cos(TAU * (c * t + d));
 }
 
-// ─── Mountain Height Function ────────────────────────────────────────
-
-float mountain(vec2 uv, float aspect, float depth, float t) {
-    vec2 cUv = uv - vec2(0.5, 0.80);
-    cUv.x *= aspect;
-
-    float scale = mix(8.0, 0.8, pow(depth, 1.5));
-    float parallaxX = cUv.x * scale * (1.0 + abs(cUv.x) * mix(0.1, 1.2, depth));
-
-    float speed = mix(0.01, 0.08, depth);
-    vec2 p = vec2(parallaxX + t * speed, depth * 25.0);
-
-    float warp = fbm(p * 0.3 + vec2(t * 0.1, 0.0), 4) * 0.5;
-
-    float ridgeNoise  = ridged(p * 0.25 + warp, 7);
-    float smoothNoise = fbm(p * 0.25 + warp, 6);
-    float h = mix(ridgeNoise, smoothNoise, 0.35) * 1.6;
-    h = pow(h, 0.72);
-
-    float gorgeDepth = mix(0.02, 0.85, pow(depth, 1.4));
-    float gorgeCurve = smoothstep(mix(0.1, 1.8, depth), 0.0, abs(cUv.x));
-
-    float baseY = 0.60 - pow(depth, 1.2) * 0.55 - (gorgeCurve * gorgeDepth);
-
-    float breathAmp = mix(0.005, 0.06, depth);
-    float breath = sin(t * 2.0 - length(cUv) * 5.0 + depth * 10.0) * breathAmp;
-
-    return baseY + h * mix(0.22, 0.92, depth) + breath;
+// Deep ocean palette
+vec3 palDeep(float t) {
+    vec3 a = vec3(0.20, 0.15, 0.45);
+    vec3 b = vec3(0.35, 0.40, 0.55);
+    vec3 c = vec3(1.00, 0.70, 0.40);
+    vec3 d = vec3(0.00, 0.15, 0.60);
+    return a + b * cos(TAU * (c * t + d));
 }
 
-// ─── Volumetric Cloud Layer ──────────────────────────────────────────
-
-float cloudDensity(vec2 uv, float t) {
-    vec2 p = uv * vec2(3.0, 8.0);
-    p.x += t * 0.04;
-    float density = warpedFbm(p, t);
-    density = smoothstep(0.35, 0.75, density);
-    return density;
+// Neon electric palette
+vec3 palNeon(float t) {
+    vec3 a = vec3(0.50, 0.50, 0.50);
+    vec3 b = vec3(0.50, 0.50, 0.50);
+    vec3 c = vec3(2.00, 1.00, 0.00);
+    vec3 d = vec3(0.50, 0.20, 0.25);
+    return a + b * cos(TAU * (c * t + d));
 }
 
-// ─── Main Render ─────────────────────────────────────────────────────
+// Blend between all four palettes based on slow evolving time
+vec3 palette(float t, float phase) {
+    // phase cycles through [0,4) slowly using incommensurate frequencies
+    float p = mod(phase, 4.0);
+    vec3 c;
+    if (p < 1.0)      c = mix(palWarm(t), palCool(t), p);
+    else if (p < 2.0) c = mix(palCool(t), palDeep(t), p - 1.0);
+    else if (p < 3.0) c = mix(palDeep(t), palNeon(t), p - 2.0);
+    else               c = mix(palNeon(t), palWarm(t), p - 3.0);
+    return c;
+}
 
+// ─── Tunnel cross-section shape (evolving) ──────────────────────────
+// Returns distance from center to tunnel wall for a given angle
+float tunnelShape(float angle, float z, float time) {
+    // Base radius
+    float r = 10.0;
+
+    // Morph between circle, triangle, square, pentagon
+    // Use incommensurate frequencies so shapes blend unpredictably
+    float morph1 = sin(time * 0.0731) * 0.5 + 0.5;  // ~86s period
+    float morph2 = sin(time * 0.0397) * 0.5 + 0.5;  // ~158s period
+    float morph3 = sin(time * 0.0523) * 0.5 + 0.5;  // ~120s period
+
+    // Polygon distortions at different frequencies
+    float tri  = 0.12 * morph1 * cos(angle * 3.0 + z * 0.003 + time * 0.11);
+    float quad = 0.08 * morph2 * cos(angle * 4.0 - z * 0.005 + time * 0.07);
+    float pent = 0.06 * morph3 * cos(angle * 5.0 + z * 0.004 - time * 0.13);
+    float hex  = 0.04 * sin(time * 0.0613) * cos(angle * 6.0 - z * 0.002);
+
+    // Organic warping from noise
+    float warp = fbm4(vec2(angle * 0.5 + time * 0.02, z * 0.008)) * 0.15;
+
+    // Breathing — slow expansion / contraction
+    float breathe = sin(time * 0.0419 + z * 0.001) * 0.8
+                  + sin(time * 0.0673) * 0.4;
+
+    return r + tri + quad + pent + hex + warp * r + breathe;
+}
+
+// ─── Distance field for organic interior structures ─────────────────
+float interiorSDF(vec3 p, float time) {
+    // Slowly morphing internal tendrils / lattice
+    float freq1 = 0.0317;  // ~198s
+    float freq2 = 0.0571;  // ~110s
+
+    float s1 = sin(p.x * 0.3 + time * freq1) *
+               cos(p.y * 0.4 - time * freq2) *
+               sin(p.z * 0.01 + time * 0.02);
+
+    float s2 = sin(p.y * 0.5 + time * 0.043) *
+               cos(p.z * 0.008 - time * 0.031) *
+               sin(p.x * 0.35 + time * 0.027);
+
+    float blend = sin(time * 0.0211) * 0.5 + 0.5;
+    return mix(s1, s2, blend);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
-    vec2 uv = fragCoord / iResolution.xy;
-    float aspect = iResolution.x / iResolution.y;
-    float t = iTime * 0.4;
+    vec2 u = fragCoord.xy;
+    vec2 uv = (u - 0.5 * iResolution.xy + 0.5) / iResolution.y;
 
-    // ─── Time-of-day cycle (slow) ───
-    float dayPhase = sin(iTime * 0.05) * 0.5 + 0.5;  // 0 = deep night, 1 = golden hour
+    // ─── Time bases (incommensurate → no visible repeat for ~30min+) ──
+    // Golden ratio and sqrt(2) ensure near-irrational frequency ratios
+    float t    = iTime;
+    float tSlow  = t * 0.1;                       // slow evolution
+    float tDrift = t * 0.618033988;                // golden ratio drift
+    float tWobble = t * 0.414213562;               // sqrt(2)-1 drift
+    float tPulse = sin(t * 0.0731) + sin(t * 0.0419); // compound pulse
 
-    // ─── Sky Palette (shifts with time) ───
-    vec3 nightSkyHi  = vec3(0.01, 0.01, 0.04);
-    vec3 nightSkyLo  = vec3(0.03, 0.06, 0.14);
-    vec3 dawnSkyHi   = vec3(0.06, 0.04, 0.12);
-    vec3 dawnSkyLo   = vec3(0.15, 0.25, 0.38);
+    // Palette phase — cycles through 4 palettes over ~55s
+    float palPhase = t * 0.0727;
 
-    vec3 skyHi = mix(nightSkyHi, dawnSkyHi, dayPhase);
-    vec3 skyLo = mix(nightSkyLo, dawnSkyLo, dayPhase);
+    // ─── Camera ray ─────────────────────────────────────────────────
+    vec3 rd = normalize(vec3(2.0 * u - iResolution.xy, iResolution.y));
 
-    vec3 voidColor  = mix(vec3(0.01, 0.02, 0.05), vec3(0.03, 0.04, 0.08), dayPhase);
-    vec3 mistColor  = mix(vec3(0.06, 0.14, 0.24), vec3(0.12, 0.25, 0.38), dayPhase);
-    vec3 lightColor = mix(vec3(0.7, 0.5, 0.3), vec3(1.0, 0.85, 0.55), dayPhase);
-    vec3 warmAccent = vec3(1.0, 0.45, 0.15);  // fiery rim accent
+    // Camera roll — slowly varies
+    float roll = sin(t * 0.0347) * 0.3 + sin(t * 0.0191) * 0.15;
+    rd.xy *= R(roll);
 
-    // ─── Base Sky Gradient ───
-    vec3 col = mix(skyLo, skyHi, pow(uv.y, 0.8));
+    // Camera sway — gentle lateral motion
+    float swayX = sin(t * 0.0523) * 1.5 + sin(t * 0.0317) * 0.8;
+    float swayY = cos(t * 0.0419) * 1.2 + cos(t * 0.0271) * 0.6;
 
-    // ─── Stars (fade with daylight) ───
-    float starFade = smoothstep(0.4, 0.0, dayPhase) * smoothstep(0.5, 0.85, uv.y);
-    col += stars(uv, iTime) * starFade * 0.8;
+    // Starting position (forward motion)
+    vec3 ro = vec3(swayX, swayY, t * 4.0);
 
-    // ─── Vanishing Point & Sun ───
-    vec2 vp = vec2(0.5, 0.80);
-    vec2 rayUv = uv - vp;
-    rayUv.x *= aspect;
-    float sunDist = length(rayUv);
+    // ─── Raymarch (volumetric accumulation) ─────────────────────────
+    vec4 acc = vec4(0.0);
+    float totalDist = 0.0;
+    float i;
 
-    // Multi-layered sun
-    float sunCore = smoothstep(0.035, 0.025, sunDist);
-    float sunRing = smoothstep(0.06, 0.035, sunDist) * 0.6;
-    float sunGlow = exp(-sunDist * 8.0) * 0.95;
-    float sunBloom = exp(-sunDist * 3.0) * 0.25;
+    for (i = 0.0; i < 40.0; i++) {
+        vec3 p = ro + rd * totalDist;
 
-    vec3 sunCol = mix(warmAccent, lightColor, smoothstep(0.0, 0.06, sunDist));
-    col += sunCol * (sunCore + sunRing + sunGlow) + lightColor * sunBloom;
+        // ── Tunnel rotation (evolving corkscrew) ──
+        float twistRate = 0.008 + sin(t * 0.0293) * 0.004;
+        float twistPhase = t * 0.03 + sin(t * 0.0179) * 0.5;
+        p.xy *= R(-p.z * twistRate - twistPhase);
 
-    // ─── God Rays (volumetric feel) ───
-    float angle = atan(rayUv.y, rayUv.x);
-    float rays = 0.0;
-    rays += fbm(vec2(angle * 4.0 - t * 0.2, sunDist * 2.0), 3) * 0.6;
-    rays += fbm(vec2(angle * 8.0 + t * 0.15, sunDist * 3.0), 2) * 0.4;
-    float rayMask = smoothstep(0.0, 0.3, sunDist) * smoothstep(1.2, 0.3, sunDist);
-    rays *= rayMask;
-    col += lightColor * pow(max(rays, 0.0), 2.0) * 0.7;
+        // ── Cross-section distance ──
+        float angle = atan(p.y, p.x);
+        float radius = length(p.xy);
+        float wallDist = tunnelShape(angle, p.z, t) - radius;
 
-    // Radial light scatter near horizon
-    float horizonGlow = exp(-abs(uv.y - 0.78) * 6.0) * exp(-abs(uv.x - 0.5) * 1.5);
-    col += mix(warmAccent, lightColor, 0.5) * horizonGlow * 0.35;
+        // ── Step size ──
+        float s = 0.5;
+        s = max(s, 3.0 * wallDist);
 
-    // ─── Mountain Layers ───
-    float prevH = 0.0;
-    for (float i = 0.0; i < LAYERS; i++) {
-        float depth = i / (LAYERS - 1.0);
-        float h = mountain(uv, aspect, depth, t);
+        // ── Organic energy field ──
+        float interior = interiorSDF(p, t);
 
-        float mask = smoothstep(h + 0.004, h - 0.003, uv.y);
+        // Traveling waves — multiple incommensurate speeds
+        float wave1 = sin(t * 0.97 - p.x * 0.5 + p.z * 0.003) * 0.85;
+        float wave2 = sin(tDrift - p.y * 0.3 + p.z * 0.005) * 0.45;
+        float wave3 = sin(tWobble + length(p.xy) * 0.2 - p.z * 0.004) * 0.35;
 
-        // Layer silhouette color (darker = closer, mistier = farther)
-        vec3 layerInk = mix(mistColor * 1.6, voidColor, pow(depth, 0.7));
-
-        // Internal depth shading
-        float depthInside = max(0.0, h - uv.y);
-        float rockTex = valuenoise(uv * mix(120.0, 25.0, depth) + depth * 11.0);
-        vec3 shade = layerInk * (1.0 - depthInside * mix(2.5, 9.0, depth));
-
-        // Subtle warm highlight on rock surfaces catching sunlight
-        float sunAngle = dot(normalize(vec2(0.0, 1.0)), normalize(vp - uv));
-        shade += lightColor * rockTex * 0.08 * (1.0 - depth) * max(sunAngle, 0.0);
-
-        // ─── Rim Lighting (bright edge glow) ───
-        float rimWidth = mix(0.008, 0.003, depth);
-        float rim = smoothstep(rimWidth, 0.0, abs(uv.y - h));
-        vec3 rimCol = mix(warmAccent, lightColor, depth);
-        shade += rimCol * rim * mix(1.2, 0.3, depth);
-
-        // Atmospheric mist between layers
-        float mistBand = smoothstep(h - mix(0.06, 0.55, depth), h + 0.03, uv.y);
-        vec3 layerMist = mix(mistColor * 0.6, mistColor * 0.3, depth);
-        vec3 finalLayerCol = mix(layerMist, shade, mistBand);
-
-        col = mix(col, finalLayerCol, mask);
-        prevH = h;
-    }
-
-    // ─── Cloud Sea (between middle layers) ───
-    float cloudBand = smoothstep(0.25, 0.45, uv.y) * smoothstep(0.65, 0.45, uv.y);
-    float clouds = cloudDensity(uv, t);
-    vec3 cloudCol = mix(mistColor * 1.2, lightColor * 0.6, clouds * 0.4);
-    // Clouds lit from above by the sun
-    float cloudLit = exp(-length(uv - vp) * 3.0);
-    cloudCol += warmAccent * cloudLit * 0.2;
-    col = mix(col, cloudCol, clouds * cloudBand * 0.55);
-
-    // ─── Mist Tendrils (animated wisps) ───
-    for (float m = 0.0; m < 3.0; m++) {
-        float mistY = 0.25 + m * 0.12;
-        float tendril = fbm(vec2(uv.x * 6.0 + t * (0.06 + m * 0.02), m * 7.7), 5);
-        tendril = smoothstep(0.4, 0.7, tendril);
-        float band = exp(-pow((uv.y - mistY) * 12.0, 2.0));
-        vec3 tendrilCol = mix(mistColor, lightColor * 0.3, 0.3);
-        col = mix(col, tendrilCol, tendril * band * 0.3);
-    }
-
-    // ─── Reflective Water (bottom of canyon) ───
-    float waterLine = 0.12;
-    if (uv.y < waterLine) {
-        // Mirror UV for reflection
-        vec2 refUv = vec2(uv.x, waterLine + (waterLine - uv.y));
-
-        // Water surface distortion
-        float wave1 = sin(uv.x * 40.0 + t * 3.0) * 0.003;
-        float wave2 = sin(uv.x * 80.0 - t * 2.5) * 0.001;
-        float wave3 = valuenoise(vec2(uv.x * 15.0, t * 0.8)) * 0.006;
-        refUv.y += wave1 + wave2 + wave3;
-        refUv.x += sin(uv.y * 60.0 + t * 2.0) * 0.002;
-
-        // Sample reflected sky color (simplified)
-        vec3 refCol = mix(skyLo, skyHi, pow(refUv.y, 0.8));
-        float refSunDist = length((refUv - vp) * vec2(aspect, 1.0));
-        refCol += lightColor * exp(-refSunDist * 6.0) * 0.5;
-
-        // Water darkening and tint
-        float waterDepth = (waterLine - uv.y) / waterLine;
-        vec3 waterTint = vec3(0.03, 0.08, 0.18);
-        refCol = mix(refCol * 0.35, waterTint, waterDepth * 0.6);
-
-        // Fresnel-like brightening at water edge
-        float fresnel = smoothstep(0.04, 0.0, waterLine - uv.y);
-        refCol += lightColor * fresnel * 0.15;
-
-        // Specular highlights on wave crests
-        float specular = pow(max(sin(uv.x * 60.0 + t * 3.0), 0.0), 32.0);
-        specular *= smoothstep(0.08, 0.0, waterLine - uv.y);
-        refCol += lightColor * specular * 0.2;
-
-        col = mix(col, refCol, smoothstep(waterLine + 0.005, waterLine - 0.005, uv.y));
-    }
-
-    // ─── Organic Fog (base atmosphere) ───
-    float fogNoise = fbm(vec2(uv.x * 3.0 + t * 0.1, uv.y * 5.0 - t * 0.05), 4);
-    float fogGrad = smoothstep(0.0, 0.55, uv.y) * smoothstep(0.9, 0.35, uv.y);
-    vec3 fogCol = mix(mistColor, lightColor * 0.3, fogNoise * 0.5);
-    col += fogCol * fogNoise * fogGrad * 0.3;
-
-    // ─── Floating Particles (dust motes / fireflies) ───
-    for (float p = 0.0; p < 30.0; p++) {
-        float rnd1 = hash21(vec2(p, p * 1.23));
-        float rnd2 = hash21(vec2(p * 2.34, p));
-        vec2 particlePos = vec2(
-            fract(rnd1 + t * (0.01 + rnd2 * 0.02)),
-            0.15 + rnd2 * 0.55
+        // Combine into distance offset
+        s += abs(
+            p.y * 0.004 +
+            wave1 + wave2 * interior +
+            wave3 +
+            0.8
         );
-        particlePos.y += sin(t * (1.0 + rnd1 * 2.0) + rnd1 * TAU) * 0.02;
 
-        vec2 diff = (uv - particlePos) * vec2(aspect, 1.0);
-        float dist = length(diff);
-        float glow = exp(-dist * 600.0) * (0.5 + 0.5 * sin(t * 3.0 + rnd1 * TAU));
+        // Additional geometric features — ribs / rings
+        float ribs = sin(p.z * 0.15 + t * 0.2) * 0.3 *
+                     smoothstep(8.0, 5.0, radius);
+        s += abs(ribs) * 0.5;
 
-        vec3 particleCol = mix(lightColor, vec3(0.7, 0.9, 1.0), rnd1);
-        col += particleCol * glow * 0.4;
+        // Lattice-like structures that appear and disappear
+        float latticeStrength = sin(t * 0.0211) * 0.5 + 0.5;
+        float lattice = sin(p.x * 1.5) * sin(p.y * 1.5) * sin(p.z * 0.05);
+        s += abs(lattice) * latticeStrength * 0.4;
+
+        totalDist += s;
+
+        // ── Volumetric glow accumulation ──
+        float glow = 1.0 / (s * 0.18 + 0.01);
+
+        // Depth-dependent color temperature shift
+        float depthColor = length(p) * 0.001 + tSlow;
+
+        // Wall proximity glow (brighter near walls)
+        float wallGlow = exp(-wallDist * 0.3) * 0.5;
+
+        // Accumulate with depth fade
+        float fade = exp(-totalDist * 0.002);
+        acc.rgb += (glow + wallGlow) * fade *
+                   palette(depthColor, palPhase + wallGlow * 0.5);
+        acc.a += glow * fade;
     }
 
-    // ─── Cinema Post-Processing ──────────────────────────────────────
+    // ─── Color & Tone ───────────────────────────────────────────────
 
-    // Film grain
-    float grain = hash21(fragCoord + fract(iTime) * 999.0) - 0.5;
-    col += grain * 0.03;
+    // Base color from accumulated volumetrics
+    vec3 col = acc.rgb;
 
-    // Vignette (oval)
-    vec2 vc = (uv - 0.5) * vec2(1.1, 1.0);
-    col *= 1.0 - 0.55 * dot(vc, vc);
+    // Apply evolving palette based on total accumulated light
+    float intensity = length(col);
+    float palIdx = intensity * 0.01 + tSlow;
+    col *= palette(palIdx, palPhase) * 0.6 + 0.5;
 
-    // Filmic tone mapping (ACES approximation)
-    col = max(col, 0.0);
-    col = (col * (2.51 * col + 0.03)) / (col * (2.43 * col + 0.59) + 0.14);
+    // ─── Shimmer / Interference Layer ───────────────────────────────
+    // Evolving screen-space pattern (not just pulsing dots)
+    float shimmerPhase = sin(t * 0.0613) * 0.5 + 0.5;
 
-    // Color grading — slight teal shadows, warm highlights
-    vec3 shadows = vec3(0.05, 0.08, 0.12);
-    vec3 highlights = vec3(1.0, 0.95, 0.88);
-    float lum = dot(col, vec3(0.299, 0.587, 0.114));
-    col = mix(col + shadows * (1.0 - lum) * 0.15,
-              col * highlights,
-              smoothstep(0.0, 1.0, lum));
+    // Multiple interference patterns at incommensurate frequencies
+    float pattern1 = length(sin(uv * 180.0 + t * 0.3) / 1.5);
+    float pattern2 = length(sin(uv * 120.0 * R(t * 0.01) + tDrift * 0.2) / 1.8);
+    float pattern = mix(pattern1, pattern2, shimmerPhase);
 
-    // Subtle chromatic aberration at edges
-    float caStrength = dot(vc, vc) * 0.008;
-    // We simulate by slightly shifting the color channels based on vignette distance
+    float shimmerEdge = abs(sin(t * 3.7 + sin(t * 0.29) * 2.0));
+    shimmerEdge = mix(shimmerEdge, abs(sin(t * 2.1 + sin(t * 0.17) * 3.0)), 0.5);
+
+    col -= 18.0 * smoothstep(
+        0.001,
+        shimmerEdge,
+        0.7 - pattern - abs(uv.y) + 0.2
+    ) * (0.5 + 0.5 * sin(t * 0.0523));  // fade shimmer in/out
+
+    // ─── Brightness normalization ───────────────────────────────────
+    col /= 55.0;
+
+    // ─── Particle / spark system ────────────────────────────────────
+    for (float p = 0.0; p < 20.0; p++) {
+        float rnd1 = hash11(p * 13.73);
+        float rnd2 = hash11(p * 7.31 + 5.0);
+        float rnd3 = hash11(p * 3.17 + 11.0);
+
+        // Particles travel in spirals with evolving parameters
+        float pTime = t * (0.3 + rnd1 * 0.7) + rnd3 * TAU;
+        float pRadius = 0.1 + rnd2 * 0.35;
+        float pAngle = pTime * (0.5 + rnd1) + rnd2 * TAU;
+
+        vec2 particlePos = vec2(
+            cos(pAngle) * pRadius,
+            sin(pAngle) * pRadius
+        );
+
+        // Drift outward then reset
+        float drift = fract(t * 0.05 * (1.0 + rnd1) + rnd3);
+        particlePos *= 0.3 + drift * 2.0;
+
+        vec2 diff = uv - particlePos;
+        float dist = length(diff);
+
+        // Sparkle with varying intensity
+        float sparkle = sin(pTime * 5.0) * 0.5 + 0.5;
+        float glow = exp(-dist * 400.0) * sparkle * (1.0 - drift);
+
+        vec3 sparkCol = palette(rnd1 + tSlow * 0.3, palPhase);
+        col += sparkCol * glow * 0.5;
+    }
+
+    // ─── Radial gradient & vignette ─────────────────────────────────
+    float l = length(uv);
+    col *= 1.2 - l;
+
+    // ─── Center glow (palette-driven, evolving) ────────────────────
+    vec3 centerCol = palette(l - 0.23 + tSlow * 0.5, palPhase);
+    col = mix(col, centerCol, 1.0 - smoothstep(0.01, 0.95, l));
+
+    // ─── Anamorphic lens flare (horizontal streak) ─────────────────
+    float flareStrength = exp(-abs(uv.y) * 8.0) * exp(-l * 2.0);
+    float flareFlicker = sin(t * 1.7 + sin(t * 0.31) * 3.0) * 0.3 + 0.7;
+    vec3 flareCol = palette(0.5 + tSlow, palPhase) * 0.3;
+    col += flareCol * flareStrength * flareFlicker;
+
+    // ─── Film grain (animated, subtle) ──────────────────────────────
+    float grain = hash21(fragCoord + fract(t) * 999.0) - 0.5;
+    col += grain * 0.02;
+
+    // ─── Chromatic aberration (subtle, at edges) ────────────────────
+    float caStrength = l * l * 0.012;
     col.r *= 1.0 + caStrength;
     col.b *= 1.0 - caStrength;
 
-    // Final gamma
-    col = pow(clamp(col, 0.0, 1.0), vec3(0.95, 0.97, 1.0));
+    // ─── Soft highlight compression ─────────────────────────────────
+    col = tanh(col + col);
 
-    fragColor = vec4(col, 1.0);
+    // ─── Color grading — evolving temperature ───────────────────────
+    float warmth = sin(t * 0.0347) * 0.5 + 0.5;
+    vec3 grade = mix(vec3(0.95, 0.98, 1.05), vec3(1.05, 0.98, 0.92), warmth);
+    col *= grade;
+
+    fragColor = vec4(max(col, 0.0), 1.0);
 }
